@@ -3,35 +3,76 @@ import time
 import json
 import urllib.request
 import urllib.parse
+import urllib.error
 import re
 from seleniumbase import SB
 
 _account = os.environ["MINESTRATOR_ACCOUNT"].split(",")
-EMAIL      = _account[0].strip()
-PASSWORD   = _account[1].strip()
-SERVER_ID  = os.environ.get("MINESTRATOR_SERVER_ID", "").strip()
+EMAIL = _account[0].strip()
+PASSWORD = _account[1].strip()
+SERVER_ID = os.environ.get("MINESTRATOR_SERVER_ID", "").strip()
 AUTH_TOKEN = os.environ.get("MINESTRATOR_AUTH", "").strip()
 
-_proxy = os.environ.get("GOST_PROXY", "").strip()
-LOCAL_PROXY = "http://127.0.0.1:8080" if _proxy else None
+_proxy_flag = os.environ.get("GOST_PROXY", "").strip()
+XRAY_CONFIG = os.environ.get("XRAY_CONFIG_JSON", "").strip()
+LOCAL_PROXY = "127.0.0.1:8080"
 
 _tg = os.environ.get("TG_BOT", "").strip()
 TG_CHAT_ID = _tg.split(",")[0].strip() if _tg else ""
-TG_TOKEN   = _tg.split(",")[1].strip() if _tg and "," in _tg else ""
+TG_TOKEN = _tg.split(",")[1].strip() if _tg and "," in _tg else ""
 
-LOGIN_URL  = "https://minestrator.com/connexion"
+LOGIN_URL = "https://minestrator.com/connexion"
 SERVER_URL = f"https://minestrator.com/my/server/{SERVER_ID}"
-API_URL    = f"https://mine.sttr.io/server/{SERVER_ID}/poweraction"
+API_URL = f"https://mine.sttr.io/server/{SERVER_ID}/poweraction"
+
+
+# ============================================================
+# 工具函数
+# ============================================================
+
+def now_str():
+    import datetime
+    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def mask_ip_text(text: str) -> str:
+    return re.sub(r"(\d+\.\d+\.\d+\.)\d+", r"\1xx", text or "")
+
+
+def test_local_proxy(proxy_hostport="127.0.0.1:8080", timeout=10):
+    proxy_url = f"http://{proxy_hostport}"
+    target_url = "https://api.ipify.org/?format=json"
+    proxy_handler = urllib.request.ProxyHandler({
+        "http": proxy_url,
+        "https": proxy_url,
+    })
+    opener = urllib.request.build_opener(proxy_handler)
+    req = urllib.request.Request(
+        target_url,
+        headers={"User-Agent": "Mozilla/5.0"}
+    )
+    try:
+        with opener.open(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", errors="ignore")
+            print(f"✅ 本地代理可用：{mask_ip_text(body)}")
+            return True, body
+    except Exception as e:
+        print(f"⚠️ 本地代理不可用：{e}")
+        return False, ""
+
+
+def should_use_proxy():
+    print(f"ℹ️ GOST_PROXY 开关状态：{'已设置' if _proxy_flag else '未设置'}")
+    print(f"ℹ️ XRAY_CONFIG_JSON 状态：{'已设置' if XRAY_CONFIG else '未设置'}")
+    ok, _ = test_local_proxy(LOCAL_PROXY, timeout=10)
+    return ok
+
 
 # ============================================================
 # TG 推送（可选）
 # ============================================================
 
-def now_str():
-    import datetime
-    return datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-
-def send_tg(result, detail=''):
+def send_tg(result, detail=""):
     if not TG_TOKEN or not TG_CHAT_ID:
         print("ℹ️ 未配置 TG_BOT，跳过推送")
         return
@@ -42,8 +83,11 @@ def send_tg(result, detail=''):
         f"📊 结果: {result}\n"
         f"{detail}"
     )
-    url  = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-    data = urllib.parse.urlencode({"chat_id": TG_CHAT_ID, "text": msg}).encode()
+    url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+    data = urllib.parse.urlencode({
+        "chat_id": TG_CHAT_ID,
+        "text": msg
+    }).encode()
     try:
         req = urllib.request.Request(url, data=data, method="POST")
         with urllib.request.urlopen(req, timeout=15):
@@ -79,7 +123,7 @@ INJECT_TOKEN_LISTENER_JS = """
                     HTMLInputElement.prototype, 'value'
                 ).set;
                 nativeSet.call(inputs[i], d.token);
-                inputs[i].dispatchEvent(new Event('input',  {bubbles: true}));
+                inputs[i].dispatchEvent(new Event('input', {bubbles: true}));
                 inputs[i].dispatchEvent(new Event('change', {bubbles: true}));
             } catch(err) {
                 inputs[i].value = d.token;
@@ -112,6 +156,7 @@ def wait_for_token(sb, timeout=60) -> str:
                 return token
         except Exception:
             pass
+
         try:
             token = sb.execute_script("""
                 (function(){
@@ -124,10 +169,11 @@ def wait_for_token(sb, timeout=60) -> str:
                 return token
         except Exception:
             pass
+
         time.sleep(1)
 
     print("❌ 等待 Token 超时")
-    return ''
+    return ""
 
 
 # ============================================================
@@ -139,150 +185,4 @@ def send_restart(sb, token: str) -> bool:
     script = (
         "var done = arguments[0];"
         'fetch("' + API_URL + '", {'
-        '  method: "PUT",'
-        '  headers: {'
-        '    "Authorization": "' + AUTH_TOKEN + '",'
-        '    "Content-Type": "application/json",'
-        '    "Accept": "application/json",'
-        '    "X-Requested-With": "XMLHttpRequest"'
-        '  },'
-        '  body: JSON.stringify({poweraction: "restart", turnstile_token: ' + token_js + '})'
-        '})'
-        '.then(function(r){ return r.json(); })'
-        '.then(function(data){ done({ok: true, data: data}); })'
-        '.catch(function(err){ done({ok: false, error: err.toString()}); });'
-    )
-    try:
-        result = sb.execute_async_script(script)
-        print(f"📡 API响应：{result}")
-        if result.get("ok") and result.get("data", {}).get("api", {}).get("code") == 200:
-            print("✅ 重启指令已成功送达！")
-            return True
-        print(f"❌ API返回异常：{result}")
-        return False
-    except Exception as e:
-        print(f"⚠️ API请求异常：{e}")
-        return False
-
-
-# ============================================================
-# 主流程
-# ============================================================
-
-def run_script():
-    print("🔧 启动浏览器...")
-
-    sb_kwargs = dict(uc=True, test=True)
-    if LOCAL_PROXY:
-        sb_kwargs["proxy"] = LOCAL_PROXY
-        print(f"🌐 使用代理：{LOCAL_PROXY}")
-    else:
-        print("ℹ️ 未配置代理，直连运行")
-
-    with SB(**sb_kwargs) as sb:
-        print("🚀 浏览器就绪！")
-
-        # ── IP 验证 ──────────────────────────────────────────
-        print("🌐 验证出口IP...")
-        try:
-            sb.open("https://api.ipify.org/?format=json")
-            ip_text = re.sub(r'(\d+\.\d+\.\d+\.)\d+', r'\1xx', sb.get_text('body'))
-            print(f"✅ 出口IP确认：{ip_text}")
-        except Exception:
-            print("⚠️ IP验证超时，跳过")
-
-        # ── 登录 ─────────────────────────────────────────────
-        print("🔑 打开登录页面...")
-        sb.uc_open_with_reconnect(LOGIN_URL, reconnect_time=4)
-        time.sleep(3)
-
-        print("✏️ 填写账号密码...")
-        try:
-            sb.wait_for_element_visible("input[name='pseudo']", timeout=20)
-            sb.type("input[name='pseudo']", EMAIL)
-            sb.type("input[name='password']", PASSWORD)
-            try:
-                sb.execute_script(
-                    "var r=document.querySelector('#remember'); if(r) r.checked=true;"
-                )
-            except Exception:
-                pass
-        except Exception:
-            print("❌ 登录框加载失败")
-            sb.save_screenshot("login_fail.png")
-            return
-
-        print("📤 提交登录请求...")
-        try:
-            sb.find_element("button[type='submit']").click()
-        except Exception:
-            try:
-                sb.find_element(".btn-text").click()
-            except Exception:
-                print("❌ 登录按钮不可用")
-                sb.save_screenshot("login_submit_fail.png")
-                return
-
-        print("⏳ 等待登录跳转...")
-        for _ in range(40):
-            try:
-                if "/connexion" not in sb.get_current_url():
-                    print(f"✅ 登录成功！当前页：{sb.get_current_url()}")
-                    break
-            except Exception:
-                pass
-            time.sleep(0.5)
-        else:
-            print("❌ 登录等待超时")
-            sb.save_screenshot("login_timeout.png")
-            return
-
-        # ── 跳转服务器管理页 ──────────────────────────────────
-        print(f"🔃 跳转至服务器管理页：{SERVER_URL}")
-        sb.open(SERVER_URL)
-        time.sleep(3)
-        print(f"📄 当前页面：{sb.get_current_url()}")
-        sb.save_screenshot("server_page.png")
-
-        # ── 注入监听器 ────────────────────────────────────────
-        inject_listener(sb)
-
-        # ── 等待 Token ────────────────────────────────────────
-        token = wait_for_token(sb, timeout=60)
-        if not token:
-            sb.save_screenshot("token_timeout.png")
-            send_tg("❌ Token 获取超时", "Turnstile 未能自动完成")
-            return
-
-        # ── 发送重启指令 ──────────────────────────────────────
-        if not send_restart(sb, token):
-            sb.save_screenshot("api_fail.png")
-            send_tg("❌ API 重启请求失败", f"Token长度={len(token)}")
-            return
-
-        # ── 刷新页面，等待剩余时间更新 ──────────────────────
-        print("🔄 刷新页面等待利用期限更新...")
-        time.sleep(5)
-        sb.open(SERVER_URL)
-        time.sleep(5)
-        try:
-            remaining = sb.execute_script(r"""
-                (function(){
-                    var spans = document.querySelectorAll('[data-slot="base"] span');
-                    var parts = [];
-                    for (var i = 0; i < spans.length; i++) {
-                        var t = spans[i].textContent.trim();
-                        if (/^\d+[hms]$/.test(t)) parts.push(t);
-                    }
-                    return parts.length ? parts.join(' ') : '';
-                })()
-            """)
-            detail = f"⏰ 利用期限：{remaining}" if remaining else "⏰ 利用期限：获取失败"
-        except Exception:
-            detail = "利用期限：获取失败"
-        print(f"⏱️ {detail}")
-        send_tg("✅ 重启成功！", detail)
-
-
-if __name__ == "__main__":
-    run_script()
+        '  
