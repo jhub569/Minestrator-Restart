@@ -7,11 +7,12 @@ import re
 from seleniumbase import SB
 
 _account = os.environ["MINESTRATOR_ACCOUNT"].split(",")
-EMAIL = _account[0].strip()
-PASSWORD = _account[1].strip()
-SERVER_ID = os.environ.get("MINESTRATOR_SERVER_ID", "").strip()
+EMAIL      = _account[0].strip()
+PASSWORD   = _account[1].strip()
+SERVER_ID  = os.environ.get("MINESTRATOR_SERVER_ID", "").strip()
 AUTH_TOKEN = os.environ.get("MINESTRATOR_AUTH", "").strip()
 
+# ===== 只修改代理部分：开始 =====
 _proxy = os.environ.get("GOST_PROXY", "").strip()
 _xray = os.environ.get("XRAY_CONFIG_JSON", "").strip()
 
@@ -37,14 +38,15 @@ def _proxy_ok(proxy_hostport="127.0.0.1:8080", timeout=8):
         return False
 
 LOCAL_PROXY = "127.0.0.1:8080" if (_proxy or _xray) and _proxy_ok("127.0.0.1:8080") else None
+# ===== 只修改代理部分：结束 =====
 
 _tg = os.environ.get("TG_BOT", "").strip()
 TG_CHAT_ID = _tg.split(",")[0].strip() if _tg else ""
-TG_TOKEN = _tg.split(",")[1].strip() if _tg and "," in _tg else ""
+TG_TOKEN   = _tg.split(",")[1].strip() if _tg and "," in _tg else ""
 
-LOGIN_URL = "https://minestrator.com/connexion"
+LOGIN_URL  = "https://minestrator.com/connexion"
 SERVER_URL = f"https://minestrator.com/my/server/{SERVER_ID}"
-API_URL = f"https://mine.sttr.io/server/{SERVER_ID}/poweraction"
+API_URL    = f"https://mine.sttr.io/server/{SERVER_ID}/poweraction"
 
 # ============================================================
 # TG 推送（可选）
@@ -52,9 +54,9 @@ API_URL = f"https://mine.sttr.io/server/{SERVER_ID}/poweraction"
 
 def now_str():
     import datetime
-    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-def send_tg(result, detail=""):
+def send_tg(result, detail=''):
     if not TG_TOKEN or not TG_CHAT_ID:
         print("ℹ️ 未配置 TG_BOT，跳过推送")
         return
@@ -65,7 +67,7 @@ def send_tg(result, detail=""):
         f"📊 结果: {result}\n"
         f"{detail}"
     )
-    url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+    url  = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     data = urllib.parse.urlencode({"chat_id": TG_CHAT_ID, "text": msg}).encode()
     try:
         req = urllib.request.Request(url, data=data, method="POST")
@@ -73,7 +75,6 @@ def send_tg(result, detail=""):
             print("📨 TG推送成功")
     except Exception as e:
         print(f"⚠️ TG推送失败：{e}")
-
 
 # ============================================================
 # Invisible Turnstile：注入监听器，轮询等待 token
@@ -103,4 +104,6 @@ INJECT_TOKEN_LISTENER_JS = """
                 ).set;
                 nativeSet.call(inputs[i], d.token);
                 inputs[i].dispatchEvent(new Event('input', {bubbles: true}));
-                inputs[i].dispatchEvent(new Event('change', 
+                inputs[i].dispatchEvent(new Event('change', {bubbles: true}));
+            } catch(err) {
+                inputs[i].value = 
