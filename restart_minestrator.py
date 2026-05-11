@@ -13,7 +13,30 @@ SERVER_ID  = os.environ.get("MINESTRATOR_SERVER_ID", "").strip()
 AUTH_TOKEN = os.environ.get("MINESTRATOR_AUTH", "").strip()
 
 _proxy = os.environ.get("GOST_PROXY", "").strip()
-LOCAL_PROXY = "http://127.0.0.1:8080" if _proxy else None
+_xray = os.environ.get("XRAY_CONFIG_JSON", "").strip()
+
+def _proxy_ok(proxy_hostport="127.0.0.1:8080", timeout=8):
+    try:
+        proxy_url = f"http://{proxy_hostport}"
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({
+                "http": proxy_url,
+                "https": proxy_url,
+            })
+        )
+        req = urllib.request.Request(
+            "https://api.ipify.org/?format=json",
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
+        with opener.open(req, timeout=timeout) as r:
+            body = r.read().decode("utf-8", errors="ignore")
+            print(f"✅ 本地代理检测成功：{body}")
+            return True
+    except Exception as e:
+        print(f"⚠️ 本地代理检测失败：{e}")
+        return False
+
+LOCAL_PROXY = "127.0.0.1:8080" if (_proxy or _xray) and _proxy_ok("127.0.0.1:8080") else None
 
 _tg = os.environ.get("TG_BOT", "").strip()
 TG_CHAT_ID = _tg.split(",")[0].strip() if _tg else ""
