@@ -3,7 +3,6 @@ import time
 import json
 import urllib.request
 import urllib.parse
-import urllib.error
 import re
 from seleniumbase import SB
 
@@ -25,10 +24,6 @@ LOGIN_URL = "https://minestrator.com/connexion"
 SERVER_URL = f"https://minestrator.com/my/server/{SERVER_ID}"
 API_URL = f"https://mine.sttr.io/server/{SERVER_ID}/poweraction"
 
-
-# ============================================================
-# 工具函数
-# ============================================================
 
 def now_str():
     import datetime
@@ -68,10 +63,6 @@ def should_use_proxy():
     return ok
 
 
-# ============================================================
-# TG 推送（可选）
-# ============================================================
-
 def send_tg(result, detail=""):
     if not TG_TOKEN or not TG_CHAT_ID:
         print("ℹ️ 未配置 TG_BOT，跳过推送")
@@ -95,10 +86,6 @@ def send_tg(result, detail=""):
     except Exception as e:
         print(f"⚠️ TG推送失败：{e}")
 
-
-# ============================================================
-# Invisible Turnstile：注入监听器，轮询等待 token
-# ============================================================
 
 INJECT_TOKEN_LISTENER_JS = """
 (function() {
@@ -125,7 +112,7 @@ INJECT_TOKEN_LISTENER_JS = """
                 nativeSet.call(inputs[i], d.token);
                 inputs[i].dispatchEvent(new Event('input', {bubbles: true}));
                 inputs[i].dispatchEvent(new Event('change', {bubbles: true}));
-            } catch(err) {
+            } catch (err) {
                 inputs[i].value = d.token;
             }
         }
@@ -176,13 +163,67 @@ def wait_for_token(sb, timeout=60) -> str:
     return ""
 
 
-# ============================================================
-# API：通过浏览器 fetch 发送重启指令（携带登录 Cookie）
-# ============================================================
-
 def send_restart(sb, token: str) -> bool:
-    token_js = json.dumps(token)
-    script = (
-        "var done = arguments[0];"
-        'fetch("' + API_URL + '", {'
-        '  
+    payload = json.dumps({
+        "poweraction": "restart",
+        "turnstile_token": token
+    })
+    script = f"""
+        var done = arguments[0];
+        fetch("{API_URL}", {{
+            method: "PUT",
+            headers: {{
+                "Authorization": "{AUTH_TOKEN}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "X-Requested-With": "XMLHttpRequest"
+            }},
+            body: JSON.stringify({payload})
+        }})
+        .then(function(r) {{ return r.json(); }})
+        .then(function(data) {{ done({{ok: true, data: data}}); }})
+        .catch(function(err) {{ done({{ok: false, error: err.toString()}}); }});
+    """
+    try:
+        result = sb.execute_async_script(script)
+        print(f"📡 API响应：{result}")
+        if result.get("ok") and result.get("data", {}).get("api", {}).get("code") == 200:
+            print("✅ 重启指令已成功送达！")
+            return True
+        print(f"❌ API返回异常：{result}")
+        return False
+    except Exception as e:
+        print(f"⚠️ API请求异常：{e}")
+        return False
+
+
+def run_script():
+    print("🔧 启动浏览器前检查代理...")
+
+    use_proxy = should_use_proxy()
+
+    sb_kwargs = dict(uc=True, test=True)
+    if use_proxy:
+        sb_kwargs["proxy"] = LOCAL_PROXY
+        print(f"🌐 已启用本地代理：{LOCAL_PROXY}")
+    else:
+        print("ℹ️ 本地代理不可用，直连运行")
+
+    print("🔧 启动浏览器...")
+    with SB(**sb_kwargs) as sb:
+        print("🚀 浏览器就绪！")
+
+        print("🌐 验证出口IP...")
+        try:
+            sb.open("https://api.ipify.org/?format=json")
+            ip_text = mask_ip_text(sb.get_text("body"))
+            print(f"✅ 出口IP确认：{ip_text}")
+        except Exception as e:
+            print(f"⚠️ IP验证超时或失败，跳过：{e}")
+
+        print("🔑 打开登录页面...")
+        sb.uc_open_with_reconnect(LOGIN_URL, reconnect_time=4)
+        time.sleep(3)
+
+        print("✏️ 填写账号密码...")
+        
