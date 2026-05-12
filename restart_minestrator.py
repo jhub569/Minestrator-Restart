@@ -1,66 +1,158 @@
-name: Minestrator-Restart
+import os
+import time
+import json
+import urllib.request
+import urllib.parse
+import re
+from seleniumbase import SB
 
-on:
-  workflow_dispatch:
-  #schedule:
-    #- cron: '0 1 * * *'
-    #- cron: '0 5 * * *'
-    #- cron: '0 9 * * *'
-    #- cron: '0 13 * * *'
-  # --- 新增：接收来自 Uptime Kuma 的 Webhook 信号 ---
-  repository_dispatch:
-    types: [tunnel_offline]
+# ============================================================
+# 配置加载
+# ============================================================
+_account = os.environ.get("MINESTRATOR_ACCOUNT", "").split(",")
+EMAIL      = _account[0].strip() if len(_account) > 0 else ""
+PASSWORD   = _account[1].strip() if len(_account) > 1 else ""
+SERVER_ID  = os.environ.get("MINESTRATOR_SERVER_ID", "").strip()
+AUTH_TOKEN = os.environ.get("MINESTRATOR_AUTH", "").strip()
 
-jobs:
-  run_minestrator_restart:
-    runs-on: ubuntu-latest
-    steps:
-      - name: 📥 下载代码
-        uses: actions/checkout@v4
+# 强制指向 YAML 中 Xray 启动的本地代理端口
+LOCAL_PROXY = "http://127.0.0.1:8080"
+# 关键：防止代理干扰驱动程序内部通信
+os.environ["no_proxy"] = "localhost,127.0.0.1"
 
-      - name: 🐍 设置 Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
+_tg = os.environ.get("TG_BOT", "").strip()
+TG_CHAT_ID = _tg.split(",")[0].strip() if _tg else ""
+TG_TOKEN   = _tg.split(",")[1].strip() if _tg and "," in _tg else ""
 
-      - name: 🛡️ 启动 Xray 代理转发
-        env:
-          XRAY_CONFIG: ${{ secrets.XRAY_CONFIG_JSON }}
-        run: |
-          wget -q https://github.com/XTLS/Xray-core/releases/download/v25.12.8/Xray-linux-64.zip
-          unzip -q Xray-linux-64.zip -d xray-core
-          echo "$XRAY_CONFIG" > xray-core/config.json
-          cd xray-core
-          nohup ./xray run -c config.json > xray.log 2>&1 &
-          sleep 10
-          echo "✅ 代理已在后台启动"
+LOGIN_URL  = "https://minestrator.com/connexion"
+SERVER_URL = f"https://minestrator.com/my/server/{SERVER_ID}"
+API_URL    = f"https://mine.sttr.io/server/{SERVER_ID}/poweraction"
 
-      - name: 🛠️ 安装依赖
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y xvfb x11-utils xdotool scrot
-          pip install seleniumbase
-          seleniumbase install chromedriver
-          seleniumbase install chrome
+# ============================================================
+# 工具函数 (TG推送/时间等保持不变)
+# ============================================================
+def now_str():
+    import datetime
+    return datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-      - name: 🚀 运行脚本
-        env:
-          PYTHONIOENCODING: utf-8
-          MINESTRATOR_ACCOUNT: ${{ secrets.MINESTRATOR_ACCOUNT }}
-          MINESTRATOR_SERVER_ID: ${{ secrets.MINESTRATOR_SERVER_ID }}
-          MINESTRATOR_AUTH: ${{ secrets.MINESTRATOR_AUTH }}
-          TG_BOT: ${{ secrets.TG_BOT }}
-          HTTP_PROXY: http://127.0.0.1:8080
-          HTTPS_PROXY: http://127.0.0.1:8080
-          # 将 Webhook 传来的状态映射为环境变量，方便 Python 脚本读取（可选）
-          KUMA_STATUS: ${{ github.event.client_payload.status }}
-        run: |
-          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
-          python restart_minestrator.py --proxy=http://127.0.0.1:8080
+def send_tg(result, detail=''):
+    if not TG_TOKEN or not TG_CHAT_ID:
+        print("ℹ️ 未配置 TG_BOT，跳过推送")
+        return
+    msg = f"🎮 Minestrator 重启通知\n🕐 时间: {now_str()}\n📊 结果: {result}\n{detail}"
+    url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+    data = urllib.parse.urlencode({"chat_id": TG_CHAT_ID, "text": msg}).encode()
+    try:
+        req = urllib.request.Request(url, data=data, method="POST")
+        with urllib.request.urlopen(req, timeout=15): print("📨 TG推送成功")
+    except Exception as e: print(f"⚠️ TG推送失败：{e}")
 
-      - name: 📸 上传截图
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: debug-screenshots
-          path: "*.png"
+# ============================================================
+# Turnstile 脚本与 API 发送 (保持不变)
+# ============================================================
+INJECT_TOKEN_LISTENER_JS = """
+(function() {
+    if (window.__cf_token_listener_injected__) return;
+    window.__cf_token_listener_injected__ = true;
+    window.__cf_turnstile_token__ = '';
+    window.addEventListener('message', function(e) {
+        if (!e.origin || e.origin.indexOf('cloudflare.com') === -1) return;
+        var d = e.data;
+        if (!d || d.event !== 'complete' || !d.token) return;
+        window.__cf_turnstile_token__ = d.token;
+    });
+})();
+"""
+
+def inject_listener(sb):
+    try: sb.execute_script(INJECT_TOKEN_LISTENER_JS); print("📡 监听器已注入")
+    except: pass
+
+def wait_for_token(sb, timeout=60) -> str:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            token = sb.execute_script("return window.__cf_turnstile_token__ || '';")
+            if token and len(token) > 50: return token
+        except: pass
+        time.sleep(1)
+    return ''
+
+def send_restart(sb, token: str) -> bool:
+    token_js = json.dumps(token)
+    script = (
+        "var done = arguments[0];"
+        'fetch("' + API_URL + '", {'
+        '  method: "PUT",'
+        '  headers: {'
+        '    "Authorization": "' + AUTH_TOKEN + '",'
+        '    "Content-Type": "application/json",'
+        '    "X-Requested-With": "XMLHttpRequest"'
+        '  },'
+        '  body: JSON.stringify({poweraction: "restart", turnstile_token: ' + token_js + '})'
+        '})'
+        '.then(function(r){ return r.json(); })'
+        '.then(function(data){ done({ok: true, data: data}); })'
+        '.catch(function(err){ done({ok: false, error: err.toString()}); });'
+    )
+    try:
+        result = sb.execute_async_script(script)
+        return result.get("ok") and result.get("data", {}).get("api", {}).get("code") == 200
+    except: return False
+
+# ============================================================
+# 主流程 (核心修改处)
+# ============================================================
+def run_script():
+    print("🔧 启动浏览器（强制代理模式）...")
+
+    # 关键参数：解决 GitHub Actions 下的 Service Unavailable 报错
+    sb_kwargs = {
+        "uc": True,
+        "test": True,
+        "headless": True,
+        "proxy": LOCAL_PROXY,
+        "chromium_arg": "--no-sandbox,--disable-dev-shm-usage", # 解决资源限制报错
+    }
+
+    with SB(**sb_kwargs) as sb:
+        print(f"🚀 浏览器已通过代理 {LOCAL_PROXY} 启动")
+
+        # IP 验证
+        try:
+            sb.open("https://api.ipify.org")
+            print(f"✅ 出口 IP: {sb.get_text('body')}")
+        except: print("⚠️ IP 验证失败")
+
+        # 登录流程
+        print("🔑 登录中...")
+        sb.uc_open_with_reconnect(LOGIN_URL, reconnect_time=4)
+        try:
+            sb.wait_for_element_visible("input[name='pseudo']", timeout=20)
+            sb.type("input[name='pseudo']", EMAIL)
+            sb.type("input[name='password']", PASSWORD)
+            sb.click("button[type='submit']")
+            time.sleep(5)
+        except Exception as e:
+            sb.save_screenshot("error.png")
+            print(f"❌ 登录交互异常: {e}")
+            return
+
+        # 跳转与重启
+        print(f"🔃 跳转管理页: {SERVER_URL}")
+        sb.open(SERVER_URL)
+        time.sleep(5)
+        
+        inject_listener(sb)
+        token = wait_for_token(sb, timeout=60)
+        
+        if token and send_restart(sb, token):
+            print("✅ 重启指令发送成功！")
+            send_tg("✅ 重启成功！")
+        else:
+            print("❌ 重启失败")
+            sb.save_screenshot("fail.png")
+            send_tg("❌ 重启失败")
+
+if __name__ == "__main__":
+    run_script()
