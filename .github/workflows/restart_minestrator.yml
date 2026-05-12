@@ -2,16 +2,18 @@ name: Minestrator-Restart
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '0 1 * * *'   # 北京时间 09:00
-    - cron: '0 5 * * *'   # 北京时间 13:00
-    - cron: '0 9 * * *'   # 北京时间 17:00
-    - cron: '0 13 * * *'  # 北京时间 21:00
+  #schedule:
+    #- cron: '0 1 * * *'
+    #- cron: '0 5 * * *'
+    #- cron: '0 9 * * *'
+    #- cron: '0 13 * * *'
+  # --- 新增：接收来自 Uptime Kuma 的 Webhook 信号 ---
+  repository_dispatch:
+    types: [tunnel_offline]
 
 jobs:
   run_minestrator_restart:
     runs-on: ubuntu-latest
-
     steps:
       - name: 📥 下载代码
         uses: actions/checkout@v4
@@ -25,30 +27,18 @@ jobs:
         env:
           XRAY_CONFIG: ${{ secrets.XRAY_CONFIG_JSON }}
         run: |
-          echo "📦 下载并解压 Xray-core..."
           wget -q https://github.com/XTLS/Xray-core/releases/download/v25.12.8/Xray-linux-64.zip
           unzip -q Xray-linux-64.zip -d xray-core
-          
-          echo "📝 写入节点配置..."
-          printf '%s' "$XRAY_CONFIG" > xray-core/config.json
-          
-          echo "🚀 启动 Xray 服务..."
+          echo "$XRAY_CONFIG" > xray-core/config.json
           cd xray-core
-          chmod +x xray
           nohup ./xray run -c config.json > xray.log 2>&1 &
-          sleep 5
-          
-          echo "✅ Xray 已启动，测试代理连通性并获取出口 IP..."
-          curl -s --max-time 20 -x http://127.0.0.1:8080 https://api.ipify.org
-          echo ""
+          sleep 10
+          echo "✅ 代理已在后台启动"
 
-      - name: 🛠️ 安装系统依赖
+      - name: 🛠️ 安装依赖
         run: |
           sudo apt-get update
           sudo apt-get install -y xvfb x11-utils xdotool scrot
-
-      - name: 🐍 安装 Python 依赖
-        run: |
           pip install seleniumbase
           seleniumbase install chromedriver
           seleniumbase install chrome
@@ -59,22 +49,18 @@ jobs:
           MINESTRATOR_ACCOUNT: ${{ secrets.MINESTRATOR_ACCOUNT }}
           MINESTRATOR_SERVER_ID: ${{ secrets.MINESTRATOR_SERVER_ID }}
           MINESTRATOR_AUTH: ${{ secrets.MINESTRATOR_AUTH }}
-          GOST_PROXY: ${{ secrets.GOST_PROXY }}
-          XRAY_CONFIG_JSON: ${{ secrets.XRAY_CONFIG_JSON }}
           TG_BOT: ${{ secrets.TG_BOT }}
+          HTTP_PROXY: http://127.0.0.1:8080
+          HTTPS_PROXY: http://127.0.0.1:8080
+          # 将 Webhook 传来的状态映射为环境变量，方便 Python 脚本读取（可选）
+          KUMA_STATUS: ${{ github.event.client_payload.status }}
         run: |
-          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python restart_minestrator.py
+          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
+          python restart_minestrator.py --proxy=http://127.0.0.1:8080
 
-      - name: 📸 上传截图（调试用）
+      - name: 📸 上传截图
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: debug-screenshots
           path: "*.png"
-
-      - name: 📄 上传 Xray 日志
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: xray-log
-          path: xray-core/xray.log
